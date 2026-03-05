@@ -1,0 +1,40 @@
+version: "3.8"
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  flask:
+    build: .
+    ports: ["5000:5000"]
+    depends_on: [redis]
+    environment:
+      - FLASK_ENV=development
+      - SECRET_KEY=iitm-placement-secret-2024
+      - JWT_SECRET_KEY=iitm-jwt-secret-2024
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=sqlite:///placement_portal.db
+      - MAIL_SERVER=smtp.gmail.com
+      - MAIL_PORT=587
+      - MAIL_USE_TLS=true
+      - MAIL_USERNAME=your-satwikgundagani2@gmail.com
+      - MAIL_PASSWORD=hkqarncyqmxclsiu
+      - ADMIN_EMAIL=admin@iitm.ac.in
+    volumes:
+      - ./backend/uploads:/app/backend/uploads
+      - ./backend/exports:/app/backend/exports
+      - ./backend/offer_letters:/app/backend/offer_letters
+
+  celery_worker:
+    build: .
+    command: celery -A backend.tasks.celery_worker.celery worker --beat --loglevel=info
+    depends_on: [redis, flask]
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=sqlite:///placement_portal.db
+      - MAIL_SERVER=smtp.gmail.com
+      - MAIL_PORT=587
+      - MAIL_USE_TLS=true
+      - MAIL_USERNAME=your-email@gmail.com
+      - MAIL_PASSWORD=your-app-password
+      - ADMIN_EMAIL=admin@iitm.ac.in
