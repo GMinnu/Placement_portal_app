@@ -7,6 +7,7 @@ StudentProfile model storing academic and personal details for students.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict
 
 from backend.extensions import db
@@ -80,6 +81,9 @@ class StudentProfile(db.Model):
         Returns:
             Dict[str, Any]: Student profile data (excluding large binary content).
         """
+        resume_filename = Path(self.resume_path).name if self.resume_path else None
+        resume_url = f"/api/student/resume/{resume_filename}" if resume_filename else None
+
         return {
             "id": self.id,
             "user_id": self.user_id,
@@ -92,6 +96,7 @@ class StudentProfile(db.Model):
             "cgpa": self.cgpa,
             "phone": self.phone,
             "resume_path": self.resume_path,
+            "resume_url": resume_url,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

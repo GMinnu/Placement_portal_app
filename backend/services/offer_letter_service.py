@@ -106,7 +106,7 @@ def _build_offer_letter_html(
           <p>Dear <strong>{student_name}</strong>,</p>
           <p>
             Congratulations! On behalf of the <strong>Indian Institute of Technology Madras — Placement Cell</strong>,
-            we are pleased to inform you that you have been shortlisted for an offer with <strong>{company_name}</strong>.
+            we are pleased to inform you that you have been <strong>selected</strong> by <strong>{company_name}</strong>.
           </p>
           <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:14px 16px;margin:14px 0;">
             <div style="font-size:14px;"><strong>Company:</strong> {company_name}</div>
@@ -140,7 +140,7 @@ def _build_offer_letter_html(
 
 def generate_offer_letter(application_id: int) -> str:
     """
-    Auto-generates a dummy HTML offer letter when a student is shortlisted.
+    Auto-generates a dummy HTML offer letter when a student is selected.
 
     Fetches Application → StudentProfile + PlacementDrive + CompanyProfile.
     Generates a professional HTML file styled with inline CSS containing:

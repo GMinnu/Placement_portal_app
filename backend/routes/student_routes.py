@@ -92,6 +92,43 @@ def _allowed_resume_extension(filename: str) -> bool:
     return ext in {".pdf", ".doc", ".docx"}
 
 
+def _as_utc(dt: datetime | None) -> datetime | None:
+    """
+    Normalize a datetime to timezone-aware UTC.
+
+    If dt is naive, it is treated as UTC for consistency across the app.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _drive_student_view(student: StudentProfile, drive: PlacementDrive) -> Dict[str, Any]:
+    """
+    Drive payload tailored for the student UI.
+
+    Includes eligibility and whether the student already applied.
+    """
+    is_ok, reason = check_eligibility(student, drive)
+    now = datetime.now(timezone.utc)
+    deadline_utc = _as_utc(drive.application_deadline)
+    deadline_passed = bool(deadline_utc and deadline_utc < now)
+
+    already_applied = (
+        Application.query.filter_by(student_id=student.id, drive_id=drive.id).first()
+        is not None
+    )
+
+    payload = drive.to_dict(include_company=True)
+    payload["eligibility"] = {"is_eligible": bool(is_ok), "reason": reason}
+    payload["already_applied"] = bool(already_applied)
+    payload["deadline_passed"] = bool(deadline_passed)
+    payload["can_apply"] = bool(is_ok and not already_applied and not deadline_passed)
+    return payload
+
+
 @student_bp.get("/dashboard")
 @jwt_required()
 @role_required("student")
@@ -100,13 +137,14 @@ def student_dashboard():
     Route: GET /api/student/dashboard
     Auth: Bearer JWT (required)
     Role: student
-    Description: List approved drives filtered by eligibility and optional query filters (cached 2 minutes).
+    Description: List approved drives with optional query filters.
+    Includes eligibility info and apply-ability for the logged-in student.
 
     Query params:
         branch, min_cgpa, year, search
 
     Returns:
-        Flask response: JSON list of eligible drives.
+        Flask response: JSON list of drives (approved) with eligibility metadata.
     """
     try:
         student = _get_student_for_current_user()
@@ -134,7 +172,7 @@ def student_dashboard():
 
         drives = query.order_by(PlacementDrive.application_deadline.asc()).all()
 
-        eligible_drives = []
+        visible_drives: List[Dict[str, Any]] = []
         for d in drives:
             company = d.company
             # Company must be approved and its user must not be blacklisted or inactive.
@@ -144,12 +182,46 @@ def student_dashboard():
             if company_user is None or not company_user.is_active or company_user.is_blacklisted:
                 continue
 
-            is_ok, _reason = check_eligibility(student, d)
-            if is_ok:
-                eligible_drives.append(d.to_dict(include_company=True))
+            visible_drives.append(_drive_student_view(student, d))
 
-        data = {"drives": eligible_drives}
+        data = {"drives": visible_drives}
         return _ok(data, "Drives loaded.")
+    except Exception as e:
+        return _bad(str(e), 400)
+
+
+@student_bp.get("/drives/<int:drive_id>")
+@jwt_required()
+@role_required("student")
+def get_drive_details(drive_id: int):
+    """
+    Route: GET /api/student/drives/<id>
+    Auth: Bearer JWT (required)
+    Role: student
+    Description: Fetch one approved drive with eligibility + apply-ability metadata.
+    """
+    try:
+        student = _get_student_for_current_user()
+        drive = (
+            PlacementDrive.query.options(
+                joinedload(PlacementDrive.company).joinedload(CompanyProfile.user)
+            )
+            .filter(PlacementDrive.id == int(drive_id))
+            .first()
+        )
+        if drive is None:
+            return _bad("Drive not found.", 404)
+        if drive.status != "approved":
+            return _bad("Drive is not available.", 403)
+
+        company = drive.company
+        if not company or company.approval_status != "approved":
+            return _bad("Drive is not available.", 403)
+        company_user = getattr(company, "user", None)
+        if company_user is None or not company_user.is_active or company_user.is_blacklisted:
+            return _bad("Drive is not available.", 403)
+
+        return _ok({"drive": _drive_student_view(student, drive)}, "Drive loaded.")
     except Exception as e:
         return _bad(str(e), 400)
 
@@ -332,8 +404,8 @@ def apply_to_drive(drive_id: int):
             return _bad("Drive is not open for applications.", 403)
 
         now = datetime.now(timezone.utc)
-        deadline = drive.application_deadline
-        if deadline is not None and deadline.replace(tzinfo=timezone.utc) < now:
+        deadline_utc = _as_utc(drive.application_deadline)
+        if deadline_utc is not None and deadline_utc < now:
             return _bad("Application deadline has passed.", 403)
 
         is_ok, reason = check_eligibility(student, drive)
@@ -389,7 +461,7 @@ def download_offer_letter(application_id: int):
     Route: GET /api/student/applications/<id>/offer-letter
     Auth: Bearer JWT (required)
     Role: student
-    Description: Serve offer letter HTML if available and status is shortlisted/selected.
+    Description: Serve offer letter HTML if available and status is selected.
 
     Parameters:
         application_id (int): Application id.
@@ -402,7 +474,7 @@ def download_offer_letter(application_id: int):
         app = Application.query.filter_by(id=application_id, student_id=student.id).first()
         if app is None:
             return _bad("Application not found.", 404)
-        if not app.offer_letter_path or app.status not in ["shortlisted", "selected"]:
+        if not app.offer_letter_path or app.status not in ["selected"]:
             return _bad("Offer letter is not available.", 403)
 
         filename = Path(app.offer_letter_path).name
@@ -435,8 +507,15 @@ def request_export():
         db.session.add(job)
         db.session.commit()
 
-        generate_csv_export.delay(job.id)
-        return _ok({"export_job_id": job.id}, "Export started.")
+        # Prefer async via Celery, but fall back to synchronous generation if broker/worker isn't available.
+        try:
+            generate_csv_export.delay(job.id)
+            return _ok({"export_job_id": job.id}, "Export started.")
+        except Exception:
+            # Run inline so the feature still works in local/no-redis setups.
+            generate_csv_export(job.id)
+            db.session.expire_all()
+            return _ok({"export_job_id": job.id}, "Export generated.")
     except Exception as e:
         return _bad(str(e), 400)
 

@@ -7,6 +7,7 @@ Application model tracking each student's application to a placement drive.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict
 
 from backend.extensions import db
@@ -92,6 +93,11 @@ class Application(db.Model):
             }
 
         if include_student and getattr(self, "student", None) is not None:
+            resume_filename = (
+                Path(self.student.resume_path).name
+                if getattr(self.student, "resume_path", None)
+                else None
+            )
             payload["student"] = {
                 "id": self.student.id,
                 "full_name": self.student.full_name,
@@ -99,7 +105,11 @@ class Application(db.Model):
                 "branch": self.student.branch,
                 "cgpa": self.student.cgpa,
                 "year_of_study": self.student.year_of_study,
+                "resume_filename": resume_filename,
             }
+            payload["student"]["resume_url"] = (
+                f"/api/company/applications/{self.id}/resume" if resume_filename else None
+            )
 
         return payload
 

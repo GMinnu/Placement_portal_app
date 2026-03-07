@@ -26,6 +26,8 @@ createApp({
         cgpa: '',
         phone: ''
       },
+      // Separate field to hold the selected resume file during student registration
+      studentRegisterResumeFile: null,
       companyRegisterForm: {
         email: '',
         password: '',
@@ -57,10 +59,12 @@ createApp({
         application_deadline: ''
       },
       companyDriveApplications: [],
+      companySelectedDriveId: null,
       companyBranches: ['CSE', 'ECE', 'EE', 'ME', 'CE'],
       // Student state
       studentProfile: null,
       studentDashboardDrives: [],
+      studentSelectedDrive: null,
       studentDashboardFilters: {
         search: '',
         branch: '',
@@ -127,6 +131,7 @@ createApp({
         cgpa: '',
         phone: ''
       };
+      this.studentRegisterResumeFile = null;
       this.companyRegisterForm = {
         email: '',
         password: '',
@@ -156,8 +161,10 @@ createApp({
         application_deadline: ''
       };
       this.companyDriveApplications = [];
+      this.companySelectedDriveId = null;
       this.studentProfile = null;
       this.studentDashboardDrives = [];
+      this.studentSelectedDrive = null;
       this.studentDashboardFilters = {
         search: '',
         branch: '',
@@ -215,6 +222,70 @@ createApp({
       } finally {
         this.isLoading = false;
       }
+    },
+
+    /**
+     * Fetch a protected file using JWT and return Response.
+     *
+     * @param {string} url
+     * @returns {Promise<Response>}
+     */
+    async fetchProtected(url) {
+      const headers = {};
+      if (this.token) {
+        headers['Authorization'] = `Bearer ${this.token}`;
+      }
+      const res = await fetch(url, { method: 'GET', headers });
+      if (!res.ok) {
+        // Try to parse JSON error, otherwise use status.
+        const data = await res.json().catch(() => null);
+        const msg = data && data.error ? data.error : `Request failed with status ${res.status}`;
+        throw new Error(msg);
+      }
+      return res;
+    },
+
+    /**
+     * Download a protected file (CSV/DOC/PDF) using JWT.
+     *
+     * @param {string} url
+     * @param {string} fallbackName
+     * @returns {Promise<void>}
+     */
+    async downloadProtectedFile(url, fallbackName) {
+      const res = await this.fetchProtected(url);
+      const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
+
+      // Try to infer a filename from Content-Disposition.
+      const cd = res.headers.get('Content-Disposition') || '';
+      const match = cd.match(/filename="?([^"]+)"?/i);
+      const filename = (match && match[1]) ? match[1] : fallbackName;
+
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = filename || 'download';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    },
+
+    /**
+     * Open a protected file in a new tab (HTML/PDF) using JWT.
+     *
+     * @param {string} url
+     * @param {string} mimeHint
+     * @returns {Promise<void>}
+     */
+    async openProtectedFile(url, mimeHint = '') {
+      const res = await this.fetchProtected(url);
+      const blob = await res.blob();
+      const type = blob.type || mimeHint || 'application/octet-stream';
+      const blobUrl = URL.createObjectURL(new Blob([blob], { type }));
+      window.open(blobUrl, '_blank', 'noopener');
+      // revoke later (allow browser time to load)
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
     },
 
     /**
@@ -305,10 +376,40 @@ createApp({
      */
     async submitStudentRegister() {
       try {
+        // Resume is compulsory at registration time.
+        if (!this.studentRegisterResumeFile) {
+          this.showToast('Please upload your resume before registering.', 'danger');
+          return;
+        }
+
         const payload = { ...this.studentRegisterForm };
-        await this.apiCall('POST', '/api/auth/register/student', payload);
-        // After successful registration, redirect to login instead of auto-login.
-        this.showToast('Student registered successfully. Please log in.', 'success');
+        const res = await this.apiCall('POST', '/api/auth/register/student', payload);
+
+        // Use the returned token to immediately upload the resume once.
+        const token = res && res.data && res.data.token ? res.data.token : null;
+        if (token) {
+          const formData = new FormData();
+          formData.append('resume', this.studentRegisterResumeFile);
+
+          const uploadRes = await fetch('/api/student/profile/resume', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`
+            },
+            body: formData
+          });
+
+          const uploadData = await uploadRes.json().catch(() => null);
+          if (!uploadRes.ok || (uploadData && uploadData.success === false)) {
+            const msg =
+              (uploadData && (uploadData.error || uploadData.message)) ||
+              `Resume upload failed with status ${uploadRes.status}`;
+            throw new Error(msg);
+          }
+        }
+
+        // After successful registration and resume upload, redirect to login instead of auto-login.
+        this.showToast('Student registered successfully and resume uploaded. Please log in.', 'success');
         this.studentRegisterForm = {
           email: '',
           password: '',
@@ -319,10 +420,22 @@ createApp({
           cgpa: '',
           phone: ''
         };
+        this.studentRegisterResumeFile = null;
         this.navigateTo('login');
       } catch (err) {
         this.showToast(err.message || 'Registration failed.', 'danger');
       }
+    },
+
+    /**
+     * Handle resume file selection on the student registration form.
+     *
+     * @param {Event} event - File input change event.
+     * @returns {void}
+     */
+    onStudentRegisterResumeChange(event) {
+      const file = event.target.files && event.target.files[0];
+      this.studentRegisterResumeFile = file || null;
     },
 
     /**
@@ -769,6 +882,7 @@ createApp({
      */
     async loadCompanyDriveApplications(driveId) {
       try {
+        this.companySelectedDriveId = driveId ? Number(driveId) : null;
         const res = await this.apiCall('GET', `/api/company/drives/${driveId}/applications`);
         this.companyDriveApplications = res.data.applications;
       } catch (err) {
@@ -785,11 +899,10 @@ createApp({
     async shortlistApplication(applicationId) {
       try {
         await this.apiCall('POST', `/api/company/applications/${applicationId}/shortlist`);
+        const row = this.companyDriveApplications.find(x => x.id === applicationId);
+        if (row) row.status = 'shortlisted';
         this.showToast('Application shortlisted.', 'success');
-        if (this.companyDriveApplications.length) {
-          const driveId = this.companyDriveApplications[0].drive.id;
-          this.loadCompanyDriveApplications(driveId);
-        }
+        if (this.companySelectedDriveId) this.loadCompanyDriveApplications(this.companySelectedDriveId);
       } catch (err) {
         this.showToast(err.message || 'Failed to shortlist application.', 'danger');
       }
@@ -804,11 +917,10 @@ createApp({
     async selectApplication(applicationId) {
       try {
         await this.apiCall('POST', `/api/company/applications/${applicationId}/select`);
+        const row = this.companyDriveApplications.find(x => x.id === applicationId);
+        if (row) row.status = 'selected';
         this.showToast('Application selected.', 'success');
-        if (this.companyDriveApplications.length) {
-          const driveId = this.companyDriveApplications[0].drive.id;
-          this.loadCompanyDriveApplications(driveId);
-        }
+        if (this.companySelectedDriveId) this.loadCompanyDriveApplications(this.companySelectedDriveId);
       } catch (err) {
         this.showToast(err.message || 'Failed to select application.', 'danger');
       }
@@ -823,11 +935,10 @@ createApp({
     async rejectApplication(applicationId) {
       try {
         await this.apiCall('POST', `/api/company/applications/${applicationId}/reject`);
+        const row = this.companyDriveApplications.find(x => x.id === applicationId);
+        if (row) row.status = 'rejected';
         this.showToast('Application rejected.', 'success');
-        if (this.companyDriveApplications.length) {
-          const driveId = this.companyDriveApplications[0].drive.id;
-          this.loadCompanyDriveApplications(driveId);
-        }
+        if (this.companySelectedDriveId) this.loadCompanyDriveApplications(this.companySelectedDriveId);
       } catch (err) {
         this.showToast(err.message || 'Failed to reject application.', 'danger');
       }
@@ -849,6 +960,22 @@ createApp({
         this.studentDashboardDrives = res.data.drives;
       } catch (err) {
         this.showToast(err.message || 'Unable to load student dashboard.', 'danger');
+      }
+    },
+
+    /**
+     * Load full drive details for student and navigate to detail view.
+     *
+     * @param {number} driveId - Drive id.
+     * @returns {Promise<void>}
+     */
+    async loadStudentDriveDetails(driveId) {
+      try {
+        const res = await this.apiCall('GET', `/api/student/drives/${driveId}`);
+        this.studentSelectedDrive = res.data.drive;
+        this.navigateTo('studentDriveDetails');
+      } catch (err) {
+        this.showToast(err.message || 'Unable to load drive details.', 'danger');
       }
     },
 
@@ -920,6 +1047,13 @@ createApp({
         await this.apiCall('POST', `/api/student/drives/${driveId}/apply`);
         this.showToast('Applied successfully.', 'success');
         this.loadStudentApplications();
+        // Refresh dashboard + details state so buttons update instantly.
+        if (this.currentPage === 'studentDashboard') {
+          this.loadStudentDashboard();
+        }
+        if (this.currentPage === 'studentDriveDetails' && this.studentSelectedDrive && this.studentSelectedDrive.id === driveId) {
+          this.loadStudentDriveDetails(driveId);
+        }
       } catch (err) {
         this.showToast(err.message || 'Failed to apply.', 'danger');
       }
@@ -936,6 +1070,52 @@ createApp({
         this.studentApplications = res.data.applications;
       } catch (err) {
         this.showToast(err.message || 'Unable to load applications.', 'danger');
+      }
+    },
+
+    /**
+     * View offer letter for an application in a new tab.
+     *
+     * @param {number} applicationId
+     * @returns {Promise<void>}
+     */
+    async viewOfferLetter(applicationId) {
+      try {
+        await this.openProtectedFile(`/api/student/applications/${applicationId}/offer-letter`, 'text/html');
+      } catch (err) {
+        this.showToast(err.message || 'Unable to open offer letter.', 'danger');
+      }
+    },
+
+    /**
+     * View current student's resume in a new tab.
+     *
+     * @returns {Promise<void>}
+     */
+    async viewCurrentResume() {
+      try {
+        const url = this.studentProfile && (this.studentProfile.resume_url || this.studentProfile.resume_path);
+        if (!url) {
+          this.showToast('No resume uploaded yet.', 'danger');
+          return;
+        }
+        await this.openProtectedFile(url, 'application/pdf');
+      } catch (err) {
+        this.showToast(err.message || 'Unable to open resume.', 'danger');
+      }
+    },
+
+    /**
+     * Company: open a student's resume for an application.
+     *
+     * @param {number} applicationId
+     * @returns {Promise<void>}
+     */
+    async viewStudentResumeForApplication(applicationId) {
+      try {
+        await this.openProtectedFile(`/api/company/applications/${applicationId}/resume`, 'application/pdf');
+      } catch (err) {
+        this.showToast(err.message || 'Unable to open student resume.', 'danger');
       }
     },
 
@@ -972,7 +1152,7 @@ createApp({
           if (job.status === 'done') {
             clearInterval(this.exportJobPollingId);
             this.exportJobPollingId = null;
-            window.location.href = `/api/student/export/${jobId}/download`;
+            await this.downloadProtectedFile(`/api/student/export/${jobId}/download`, `applications_${jobId}.csv`);
           } else if (job.status === 'failed') {
             clearInterval(this.exportJobPollingId);
             this.exportJobPollingId = null;
@@ -1203,6 +1383,16 @@ createApp({
                       <label class="form-label">Phone (10 digits)</label>
                       <input v-model="studentRegisterForm.phone" type="text" inputmode="numeric" maxlength="10" class="form-control" placeholder="10-digit mobile number" />
                     </div>
+                  <div class="col-md-6">
+                    <label class="form-label">Resume (PDF / DOC / DOCX)</label>
+                    <input
+                      type="file"
+                      class="form-control"
+                      accept=".pdf,.doc,.docx"
+                      @change="onStudentRegisterResumeChange"
+                    />
+                    <small class="text-muted">Uploading a resume is mandatory for registration.</small>
+                  </div>
                   </div>
                   <div class="mt-3 d-flex justify-content-between">
                     <button class="btn btn-secondary" @click="navigateTo('login')">Back to Login</button>
@@ -1561,35 +1751,35 @@ createApp({
           <div v-if="currentPage === 'adminAnalytics'">
             <h4 class="mb-3">Analytics</h4>
             <div class="row g-3">
-              <div class="col-md-6" style="height:260px;">
+              <div class="col-md-6" style="height:420px;">
                 <div class="card h-100">
                   <div class="card-header fw-semibold">Drives per Month</div>
-                  <div class="card-body">
-                    <canvas id="drivesPerMonthChart"></canvas>
+                  <div class="card-body" style="height:calc(100% - 48px);">
+                    <canvas id="drivesPerMonthChart" style="width:100%;height:100%;"></canvas>
                   </div>
                 </div>
               </div>
-              <div class="col-md-6" style="height:260px;">
+              <div class="col-md-6" style="height:420px;">
                 <div class="card h-100">
                   <div class="card-header fw-semibold">Application Status Breakdown</div>
-                  <div class="card-body">
-                    <canvas id="statusBreakdownChart"></canvas>
+                  <div class="card-body" style="height:calc(100% - 48px);">
+                    <canvas id="statusBreakdownChart" style="width:100%;height:100%;"></canvas>
                   </div>
                 </div>
               </div>
-              <div class="col-md-6" style="height:260px;">
+              <div class="col-md-6" style="height:420px;">
                 <div class="card h-100">
                   <div class="card-header fw-semibold">Top Companies by Applicants</div>
-                  <div class="card-body">
-                    <canvas id="topCompaniesChart"></canvas>
+                  <div class="card-body" style="height:calc(100% - 48px);">
+                    <canvas id="topCompaniesChart" style="width:100%;height:100%;"></canvas>
                   </div>
                 </div>
               </div>
-              <div class="col-md-6" style="height:260px;">
+              <div class="col-md-6" style="height:420px;">
                 <div class="card h-100">
                   <div class="card-header fw-semibold">Monthly Selections</div>
-                  <div class="card-body">
-                    <canvas id="monthlySelectionsChart"></canvas>
+                  <div class="card-body" style="height:calc(100% - 48px);">
+                    <canvas id="monthlySelectionsChart" style="width:100%;height:100%;"></canvas>
                   </div>
                 </div>
               </div>
@@ -1732,19 +1922,30 @@ createApp({
                     <th>Roll</th>
                     <th>Branch</th>
                     <th>CGPA</th>
+                    <th>Resume</th>
                     <th>Status</th>
                     <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr v-if="!companyDriveApplications.length">
-                    <td colspan="6" class="text-center text-muted">No applications.</td>
+                    <td colspan="7" class="text-center text-muted">No applications.</td>
                   </tr>
                   <tr v-for="a in companyDriveApplications" :key="a.id">
                     <td>{{ a.student.full_name }}</td>
                     <td>{{ a.student.roll_number }}</td>
                     <td>{{ a.student.branch }}</td>
                     <td>{{ a.student.cgpa }}</td>
+                    <td>
+                      <button
+                        v-if="a.student && a.student.resume_url"
+                        class="btn btn-sm btn-outline-primary"
+                        @click="viewStudentResumeForApplication(a.id)"
+                      >
+                        Open
+                      </button>
+                      <span v-else class="text-muted">N/A</span>
+                    </td>
                     <td>
                       <span class="badge"
                         :class="{
@@ -1758,9 +1959,27 @@ createApp({
                       </span>
                     </td>
                     <td>
-                      <button class="btn btn-sm btn-info me-1" @click="shortlistApplication(a.id)">Shortlist</button>
-                      <button class="btn btn-sm btn-success me-1" @click="selectApplication(a.id)">Select</button>
-                      <button class="btn btn-sm btn-danger" @click="rejectApplication(a.id)">Reject</button>
+                      <button
+                        class="btn btn-sm btn-info me-1"
+                        @click="shortlistApplication(a.id)"
+                        :disabled="isLoading || a.status !== 'applied'"
+                      >
+                        Shortlist
+                      </button>
+                      <button
+                        class="btn btn-sm btn-success me-1"
+                        @click="selectApplication(a.id)"
+                        :disabled="isLoading || a.status !== 'shortlisted'"
+                      >
+                        Select
+                      </button>
+                      <button
+                        class="btn btn-sm btn-danger"
+                        @click="rejectApplication(a.id)"
+                        :disabled="isLoading || a.status !== 'shortlisted'"
+                      >
+                        Reject
+                      </button>
                     </td>
                   </tr>
                 </tbody>
@@ -1812,8 +2031,69 @@ createApp({
                     <p class="mb-1"><strong>Branches:</strong> {{ d.eligible_branches }}</p>
                     <p class="mb-2"><strong>Deadline:</strong> {{ new Date(d.application_deadline).toLocaleString() }}</p>
                     <p class="flex-grow-1 text-muted small">{{ d.job_description }}</p>
-                    <button class="btn btn-primary mt-2" @click="applyToDrive(d.id)">Apply</button>
+                    <div v-if="d.eligibility && d.eligibility.is_eligible === false" class="alert alert-warning py-2 small mb-2">
+                      <strong>Not eligible:</strong> {{ d.eligibility.reason }}
+                    </div>
+                    <div v-else-if="d.deadline_passed" class="alert alert-secondary py-2 small mb-2">
+                      <strong>Closed:</strong> Deadline passed.
+                    </div>
+                    <div v-else-if="d.already_applied" class="alert alert-info py-2 small mb-2">
+                      <strong>Applied:</strong> You already applied to this drive.
+                    </div>
+                    <div class="d-flex gap-2 mt-auto">
+                      <button class="btn btn-outline-primary flex-grow-1" @click="loadStudentDriveDetails(d.id)">View details</button>
+                      <button class="btn btn-primary flex-grow-1" @click="applyToDrive(d.id)" :disabled="!d.can_apply">
+                        Apply
+                      </button>
+                    </div>
                   </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="currentPage === 'studentDriveDetails'">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+              <h4 class="mb-0">Drive Details</h4>
+              <button class="btn btn-sm btn-outline-secondary" @click="navigateTo('studentDashboard')">Back</button>
+            </div>
+            <div v-if="!studentSelectedDrive" class="alert alert-info">Loading drive...</div>
+            <div v-else class="card">
+              <div class="card-body">
+                <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+                  <div>
+                    <h5 class="mb-1">{{ studentSelectedDrive.job_title }}</h5>
+                    <div class="text-muted">
+                      {{ studentSelectedDrive.company?.company_name }} — {{ studentSelectedDrive.package_lpa }} LPA
+                    </div>
+                  </div>
+                  <div class="text-end">
+                    <div><strong>Deadline:</strong> {{ new Date(studentSelectedDrive.application_deadline).toLocaleString() }}</div>
+                    <div><strong>Eligible branches:</strong> {{ studentSelectedDrive.eligible_branches }}</div>
+                    <div><strong>Min CGPA:</strong> {{ studentSelectedDrive.min_cgpa }}</div>
+                    <div><strong>Passout year:</strong> {{ studentSelectedDrive.eligible_passout_year }}</div>
+                  </div>
+                </div>
+
+                <div class="mb-3">
+                  <h6 class="mb-2">Job Description</h6>
+                  <div class="text-muted" style="white-space: pre-wrap;">{{ studentSelectedDrive.job_description }}</div>
+                </div>
+
+                <div v-if="studentSelectedDrive.eligibility && studentSelectedDrive.eligibility.is_eligible === false" class="alert alert-warning">
+                  <strong>Not eligible:</strong> {{ studentSelectedDrive.eligibility.reason }}
+                </div>
+                <div v-else-if="studentSelectedDrive.deadline_passed" class="alert alert-secondary">
+                  <strong>Closed:</strong> Deadline passed.
+                </div>
+                <div v-else-if="studentSelectedDrive.already_applied" class="alert alert-info">
+                  <strong>Applied:</strong> You already applied to this drive.
+                </div>
+
+                <div class="text-end">
+                  <button class="btn btn-primary" @click="applyToDrive(studentSelectedDrive.id)" :disabled="!studentSelectedDrive.can_apply">
+                    Apply to this drive
+                  </button>
                 </div>
               </div>
             </div>
@@ -1852,7 +2132,7 @@ createApp({
                     <label class="form-label">Resume</label>
                     <input type="file" class="form-control" @change="uploadResume" />
                     <div v-if="studentProfile.resume_path" class="mt-1">
-                      <a :href="studentProfile.resume_path" target="_blank">View current resume</a>
+                      <button class="btn btn-link p-0" @click="viewCurrentResume">View current resume</button>
                     </div>
                   </div>
                 </div>
@@ -1900,11 +2180,13 @@ createApp({
                     </span>
                   </td>
                   <td>
-                    <a v-if="a.offer_letter_path && (a.status === 'shortlisted' || a.status === 'selected')"
-                       :href="'/api/student/applications/' + a.id + '/offer-letter'"
-                       target="_blank">
+                    <button
+                      v-if="a.offer_letter_path && (a.status === 'selected')"
+                      class="btn btn-sm btn-outline-primary"
+                      @click="viewOfferLetter(a.id)"
+                    >
                       View
-                    </a>
+                    </button>
                     <span v-else class="text-muted">N/A</span>
                   </td>
                 </tr>

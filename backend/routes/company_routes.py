@@ -8,10 +8,12 @@ URL Prefix: /api/company
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, send_from_directory
 from flask_jwt_extended import get_jwt_identity, jwt_required
 from sqlalchemy import func
 from sqlalchemy.orm import joinedload
@@ -413,7 +415,7 @@ def shortlist_application(application_id: int):
     Route: POST /api/company/applications/<id>/shortlist
     Auth: Bearer JWT (required)
     Role: company
-    Description: Shortlist an application, generate offer letter, and notify student.
+    Description: Shortlist an application and notify student.
 
     Parameters:
         application_id (int): Application id.
@@ -423,9 +425,9 @@ def shortlist_application(application_id: int):
     """
     try:
         application = _get_application_for_company(application_id)
+        if application.status != "applied":
+            return _bad("Only applied applications can be shortlisted.", 403)
         application.status = "shortlisted"
-        offer_path = generate_offer_letter(application.id)
-        application.offer_letter_path = offer_path
         db.session.commit()
 
         student_user = application.student.user if application.student else None
@@ -449,7 +451,7 @@ def select_application(application_id: int):
     Route: POST /api/company/applications/<id>/select
     Auth: Bearer JWT (required)
     Role: company
-    Description: Mark an application as selected and notify the student.
+    Description: Mark an application as selected, generate offer letter, and notify the student.
 
     Parameters:
         application_id (int): Application id.
@@ -459,7 +461,13 @@ def select_application(application_id: int):
     """
     try:
         application = _get_application_for_company(application_id)
+        if application.status != "shortlisted":
+            return _bad("Only shortlisted applications can be selected.", 403)
         application.status = "selected"
+        # Generate offer letter on selection (not on shortlist).
+        if not application.offer_letter_path:
+            offer_path = generate_offer_letter(application.id)
+            application.offer_letter_path = offer_path
         db.session.commit()
 
         student_user = application.student.user if application.student else None
@@ -494,6 +502,8 @@ def reject_application(application_id: int):
     """
     try:
         application = _get_application_for_company(application_id)
+        if application.status not in ["shortlisted"]:
+            return _bad("Only shortlisted applications can be rejected.", 403)
         application.status = "rejected"
         db.session.commit()
 
@@ -509,3 +519,39 @@ def reject_application(application_id: int):
     except Exception as e:
         return _bad(str(e), 400)
 
+
+@company_bp.get("/applications/<int:application_id>/resume")
+@jwt_required()
+@role_required("company")
+def download_student_resume(application_id: int):
+    """
+    Route: GET /api/company/applications/<id>/resume
+    Auth: Bearer JWT (required)
+    Role: company
+    Description: Download/view the student's resume for an application that belongs to this company.
+    """
+    try:
+        application = _get_application_for_company(application_id)
+        student = application.student
+        if student is None or not getattr(student, "resume_path", None):
+            return _bad("Resume not available.", 404)
+
+        filename = Path(student.resume_path).name
+        if not filename:
+            return _bad("Resume not available.", 404)
+
+        # Basic safety: only allow resumes named for the student.
+        expected_prefix = f"student_{student.id}_resume"
+        if not filename.startswith(expected_prefix):
+            return _bad("Resume not available.", 404)
+
+        from backend.config import Config
+
+        abs_path = Path(Config.UPLOAD_FOLDER) / filename
+        if not abs_path.exists():
+            return _bad("Resume file not found.", 404)
+
+        mimetype = "application/pdf" if filename.lower().endswith(".pdf") else None
+        return send_from_directory(Config.UPLOAD_FOLDER, filename, as_attachment=False, mimetype=mimetype)
+    except Exception as e:
+        return _bad(str(e), 400)

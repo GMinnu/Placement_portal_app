@@ -86,7 +86,15 @@ def create_app() -> Flask:
     db.init_app(app)
     jwt.init_app(app)
     mail.init_app(app)
-    cache.init_app(app)
+    # Redis is optional for local runs. If it's not available, fall back to in-memory cache
+    # so cached endpoints still work and the frontend never sees non-JSON error pages.
+    try:
+        cache.init_app(app)
+    except Exception:
+        app.config["CACHE_TYPE"] = "SimpleCache"
+        # Flask-Caching expects Redis keys to be absent/unused for SimpleCache.
+        app.config.pop("CACHE_REDIS_URL", None)
+        cache.init_app(app)
 
     # Register API blueprints.
     register_routes(app)
