@@ -35,6 +35,6 @@ services:
       - MAIL_SERVER=smtp.gmail.com
       - MAIL_PORT=587
       - MAIL_USE_TLS=true
-      - MAIL_USERNAME=your-email@gmail.com
-      - MAIL_PASSWORD=your-app-password
+      - MAIL_USERNAME=satwikgundagani2@gmail.com
+      - MAIL_PASSWORD=kzixvvhiofwfnumd
       - ADMIN_EMAIL=admin@iitm.ac.in

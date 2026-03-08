@@ -25,15 +25,6 @@ Thumbs.db
 # Docker
 *.pid
 
-# Project generated files
-backend/exports/
-backend/uploads/
-backend/offer_letters/
-
-# Ignore generated resume and export files
-backend/uploads/*
-backend/exports/*
-backend/offer_letters/*
 
 # Keep folder structure but ignore contents
 !backend/uploads/.gitkeep
