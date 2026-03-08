@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+
+# Environment
+.env
+venv/
+.env.*
+
+# VS Code / Cursor
+.vscode/
+.cursor/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Docker
+*.pid
+
+# Project generated files
+backend/exports/
+backend/uploads/
+backend/offer_letters/
+
+# Ignore generated resume and export files
+backend/uploads/*
+backend/exports/*
+backend/offer_letters/*
+
+# Keep folder structure but ignore contents
+!backend/uploads/.gitkeep
+!backend/exports/.gitkeep
+!backend/offer_letters/.gitkeep
